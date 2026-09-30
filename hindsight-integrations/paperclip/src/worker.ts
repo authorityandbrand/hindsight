@@ -245,6 +245,11 @@ const plugin = definePlugin({
       try {
         const apiKey = await resolveApiKey(ctx, config, companyId);
         const client = new HindsightClient(config.hindsightApiUrl, apiKey, config.requestTimeoutMs);
+        const cites = Array.from(new Set((body.match(CITE_RX) ?? []).map((c: string) => c.trim()))).slice(0, 6);
+        if (cites.length === 0) {
+          ctx.logger.info("Skipping retain: comment cites no source document (100%-cited rule)", { commentId, issueId });
+          return;
+        }
         // mylegal fork: agent output is DRAFT working memory. Route to the work bank (never the vetted record bank),
         // record its provenance (the Paperclip comment is the source of an agent statement) and tag it.
         const bankId = config.retainBankId?.trim() || deriveBankId({ companyId, agentId: bankAgentId, userId }, config);
@@ -254,7 +259,7 @@ const plugin = definePlugin({
           commentId,
           { agentId: bankAgentId, companyId, issueId, commentId },
           {
-            context: `Paperclip comment ${commentId} on issue ${issueId} by agent ${bankAgentId}`,
+            context: `Paperclip comment ${commentId} on issue ${issueId} by agent ${bankAgentId}; cites: ${cites.join("; ")}`,
             tags: [
               "origin:paperclip",
               "status:draft",
@@ -475,6 +480,9 @@ const plugin = definePlugin({
     return { ok: true };
   },
 });
+
+// mylegal fork: 100%-cited rule. A comment is retained only if it names a source document.
+const CITE_RX = /(\bDkt\.?[\s._-]*\d+|\bDocket[\s._-]+(?:No\.?[\s._-]*)?\d+|\bECF[\s._-]*(?:No\.?[\s._-]*)?\d+|\bExhibit[\s._-]+[A-Z0-9]|\bEx\.[\s._-]*[A-Z0-9]|\bInst(?:rument|\.)[\s._-]*(?:No\.?[\s._-]*)?\d|\b\d{4}-\d{5,7}\b|\bBates\b|\bPageID\b|https?:\/\/)/gi;
 
 async function recallAcrossBanks(
   client: HindsightClient,
