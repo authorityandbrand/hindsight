@@ -73,13 +73,15 @@ export class HindsightClient {
     bankId: string,
     content: string,
     documentId?: string,
-    metadata?: Record<string, string>
+    metadata?: Record<string, string>,
+    opts?: { context?: string; tags?: string[] }
   ): Promise<void> {
     const path = `/v1/default/banks/${encodeURIComponent(bankId)}/memories`;
     const item: Record<string, unknown> = {
       content,
-      context: "paperclip",
+      context: opts?.context ?? "paperclip",
     };
+    if (opts?.tags && opts.tags.length) item["tags"] = opts.tags;
     if (documentId) item["document_id"] = documentId;
     if (metadata) item["metadata"] = metadata;
     await this.request("POST", path, { items: [item], async: true });

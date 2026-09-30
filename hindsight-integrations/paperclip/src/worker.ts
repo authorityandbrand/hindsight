@@ -31,6 +31,12 @@ interface PluginConfig {
   hindsightApiKeyRef?: EnvSecretRefBinding;
   bankId?: string;
   dynamicBankId?: boolean;
+  /** mylegal fork: write bank for retains (agent output goes to a WORK bank, recall still reads bankId). */
+  retainBankId?: string;
+  /** mylegal fork: extra tags added to every retain. */
+  retainTags?: string[];
+  /** mylegal fork: extra banks read on recall in addition to the derived bank (e.g. the vetted record bank). */
+  recallBankIds?: string[];
   bankGranularity?: Array<"company" | "agent" | "user">;
   recallBudget?: "low" | "mid" | "high";
   requestTimeoutMs?: number;
@@ -135,7 +141,7 @@ const plugin = definePlugin({
         const client = new HindsightClient(config.hindsightApiUrl, apiKey, config.requestTimeoutMs);
         const bankId = deriveBankId({ companyId, agentId, userId }, config);
 
-        const response = await client.recall(bankId, query, config.recallBudget ?? "mid");
+        const response = await recallAcrossBanks(client, bankId, config.recallBankIds, query, config.recallBudget ?? "mid");
 
         const memories = formatMemories(response.results);
         if (memories) {
@@ -239,13 +245,26 @@ const plugin = definePlugin({
       try {
         const apiKey = await resolveApiKey(ctx, config, companyId);
         const client = new HindsightClient(config.hindsightApiUrl, apiKey, config.requestTimeoutMs);
-        const bankId = deriveBankId({ companyId, agentId: bankAgentId, userId }, config);
-        await client.retain(bankId, body, commentId, {
-          agentId: bankAgentId,
-          companyId,
-          issueId,
+        // mylegal fork: agent output is DRAFT working memory. Route to the work bank (never the vetted record bank),
+        // record its provenance (the Paperclip comment is the source of an agent statement) and tag it.
+        const bankId = config.retainBankId?.trim() || deriveBankId({ companyId, agentId: bankAgentId, userId }, config);
+        await client.retain(
+          bankId,
+          body,
           commentId,
-        });
+          { agentId: bankAgentId, companyId, issueId, commentId },
+          {
+            context: `Paperclip comment ${commentId} on issue ${issueId} by agent ${bankAgentId}`,
+            tags: [
+              "origin:paperclip",
+              "status:draft",
+              `agent:${bankAgentId}`,
+              `issue:${issueId}`,
+              `source:paperclip-comment:${commentId}`,
+              ...(config.retainTags ?? []),
+            ],
+          }
+        );
         ctx.logger.info("Retained comment to memory", { commentId, bankId });
       } catch (err) {
         ctx.logger.warn("Failed to retain comment", {
@@ -340,7 +359,7 @@ const plugin = definePlugin({
             apiKey,
             config.requestTimeoutMs
           );
-          const response = await client.recall(bankId, query, config.recallBudget ?? "mid");
+          const response = await recallAcrossBanks(client, bankId, config.recallBankIds, query, config.recallBudget ?? "mid");
           const memories = formatMemories(response.results);
           return { content: memories || "No relevant memories found." };
         } catch (err) {
@@ -366,12 +385,20 @@ const plugin = definePlugin({
               type: "string",
               description: "The content to store in memory",
             },
+            source: {
+              type: "string",
+              description:
+                "REQUIRED citation for the content: Dkt. N at PageID #, Exhibit, Instrument No., document id, URL or Paperclip comment id. Uncited content is rejected.",
+            },
           },
         },
       },
       async (params: unknown, runCtx: ToolRunContext) => {
-        const { content } = params as { content: string };
+        const { content, source } = params as { content: string; source?: string };
         const config = await getConfig(ctx);
+        if (!source || source.trim().length < 3) {
+          return { content: "REJECTED: every memory needs a source citation. Retry with `source` (Dkt. N at PageID #, Exhibit, Instrument No., document id, URL or comment id)." };
+        }
 
         // Read userId cached by agent.run.started for consistent bank derivation
         let userId: string | undefined;
@@ -384,10 +411,9 @@ const plugin = definePlugin({
           if (cached && typeof cached === "string") userId = cached;
         }
 
-        const bankId = deriveBankId(
-          { companyId: runCtx.companyId, agentId: runCtx.agentId, userId },
-          config
-        );
+        const bankId =
+          config.retainBankId?.trim() ||
+          deriveBankId({ companyId: runCtx.companyId, agentId: runCtx.agentId, userId }, config);
 
         try {
           const apiKey = await resolveApiKey(ctx, config, runCtx.companyId);
@@ -396,11 +422,23 @@ const plugin = definePlugin({
             apiKey,
             config.requestTimeoutMs
           );
-          await client.retain(bankId, content, undefined, {
-            agentId: runCtx.agentId,
-            companyId: runCtx.companyId,
-            runId: runCtx.runId,
-          });
+          await client.retain(
+            bankId,
+            content,
+            undefined,
+            { agentId: runCtx.agentId, companyId: runCtx.companyId, runId: runCtx.runId },
+            {
+              context: `Paperclip agent ${runCtx.agentId} run ${runCtx.runId}; source: ${source.trim()}`,
+              tags: [
+                "origin:paperclip",
+                "status:draft",
+                `agent:${runCtx.agentId}`,
+                `run:${runCtx.runId}`,
+                `source:${source.trim().replace(/\s+/g, "-").slice(0, 80)}`,
+                ...(config.retainTags ?? []),
+              ],
+            }
+          );
           return { content: "Memory saved." };
         } catch (err) {
           return { content: `Failed to save memory: ${String(err)}` };
@@ -437,6 +475,26 @@ const plugin = definePlugin({
     return { ok: true };
   },
 });
+
+async function recallAcrossBanks(
+  client: HindsightClient,
+  primary: string,
+  extra: string[] | undefined,
+  query: string,
+  budget: string
+): Promise<{ results: any[]; banks: string[] }> {
+  const banks = Array.from(new Set([primary, ...(extra ?? []).map((b) => b.trim()).filter(Boolean)]));
+  const all: any[] = [];
+  for (const b of banks) {
+    try {
+      const r = await client.recall(b, query, budget);
+      for (const m of r.results) all.push({ ...m, _bank: b });
+    } catch (err) {
+      if (b === primary) throw err;
+    }
+  }
+  return { results: all, banks };
+}
 
 export default plugin;
 runWorker(plugin, import.meta.url);

@@ -69,6 +69,24 @@ const manifest: PaperclipPluginManifestV1 = {
         description:
           "Static bank ID used when dynamicBankId is false. All agents sharing this value read/write the same memory bank.",
       },
+      retainBankId: {
+        type: "string",
+        title: "Retain Bank ID (mylegal fork)",
+        description:
+          "Write bank for retained agent comments. Set to a WORK bank so agent drafts never enter the vetted record bank. Recall still reads from the bank derived from bankId/dynamicBankId.",
+      },
+      recallBankIds: {
+        type: "array",
+        title: "Extra Recall Bank IDs (mylegal fork)",
+        description: "Additional banks read on recall besides the derived bank, e.g. the vetted record bank.",
+        items: { type: "string" },
+      },
+      retainTags: {
+        type: "array",
+        title: "Extra Retain Tags (mylegal fork)",
+        description: "Additional tags added to every retained comment (origin:paperclip, status:draft, agent:, issue:, source: are always added).",
+        items: { type: "string" },
+      },
       bankGranularity: {
         type: "array",
         title: "Bank Granularity",
